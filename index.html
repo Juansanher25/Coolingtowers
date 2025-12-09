@@ -1,544 +1,459 @@
-import React, { useState } from 'react';
-import { Calculator, Activity, Droplets, Thermometer, AlertTriangle, CheckCircle, Info, Wind, Settings, ArrowRight, User, BookOpen, Calendar, Fan, Zap } from 'lucide-react';
-
-const CoolingTowerApp = () => {
-  // --- STATE DE NAVEGACIÓN ---
-  const [showCover, setShowCover] = useState(true);
-
-  // --- STATE DE CÁLCULO ---
-  const [inputs, setInputs] = useState({
-    patm: 101.325, // kPa
-    flowRate: 15, // kg/s
-    tIn: 45, // °C
-    tOut: 30, // °C
-    tdb: 30, // °C
-    psychroMode: 'A', // 'A' = RH, 'B' = DewPoint
-    relHumidity: 60, // %
-    dewPoint: 21, // °C
-    tdsTower: 1200, // ppm
-    tdsMakeup: 300, // ppm
-    tAirOutEst: 38, // °C (Estimado salida aire saturado)
-  });
-
-  const [results, setResults] = useState(null);
-  const [analysis, setAnalysis] = useState([]);
-
-  // --- CONSTANTES & FUNCIONES FÍSICAS ---
-  const LATENT_HEAT = 2430; // kJ/kg (approx at 30°C)
-
-  // Cálculo de Cp del agua (kJ/kg°C) basado en Temperatura (°C)
-  const getWaterCp = (t) => {
-    const A = 4.2174;
-    const B = -0.005618;
-    const C = 0.0001299;
-    const D = -0.000001152;
-    return A + (B * t) + (C * t * t) + (D * t * t * t);
-  };
-
-  // Ecuación de Tetens para Presión de Vapor de Saturación (kPa)
-  const getSatVapPressure = (T) => {
-    return 0.61078 * Math.exp((17.27 * T) / (T + 237.3));
-  };
-
-  // Relación de Humedad (kg agua / kg aire seco)
-  const getHumidityRatio = (Pv, P_kPa) => {
-    return 0.622 * Pv / (P_kPa - Pv);
-  };
-
-  // Entalpía Aire Húmedo (kJ/kg aire seco)
-  // h = 1.006*T + W*(2501 + 1.86*T)
-  const getAirEnthalpy = (T, W) => {
-    return 1.006 * T + W * (2501 + 1.86 * T);
-  };
-
-  // Cálculo Iterativo de Bulbo Húmedo
-  const calculateWetBulb = (Tdb, P_kPa, humidityInput, mode) => {
-    let Pv; 
-    if (mode === 'A') {
-      const Psat = getSatVapPressure(Tdb);
-      Pv = Psat * (humidityInput / 100);
-    } else {
-      Pv = getSatVapPressure(humidityInput);
-    }
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torres de Enfriamiento - Módulo de Ingeniería</title>
     
-    let low = -20;
-    let high = Tdb;
-    let Twb_guess = Tdb;
+    <!-- 1. Cargar Tailwind CSS (Estilos) -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    for (let i = 0; i < 50; i++) {
-      Twb_guess = (low + high) / 2;
-      const Psat_wb = getSatVapPressure(Twb_guess);
-      const bracketTerm = 0.00066 * (1 + 0.00115 * Twb_guess) * P_kPa * (Tdb - Twb_guess);
-      const Pv_iter = Psat_wb - bracketTerm;
-
-      if (Pv_iter > Pv) high = Twb_guess;
-      else low = Twb_guess;
-    }
-    // Retornamos también Pv para cálculos posteriores
-    return { tWb: Twb_guess, Pv_actual: Pv };
-  };
-
-  // --- VARIABLES DERIVADAS ---
-  const tAvg = (inputs.tIn + inputs.tOut) / 2;
-  const currentCp = getWaterCp(tAvg);
-
-  // --- CÁLCULO PRINCIPAL ---
-  const handleCalculate = () => {
-    // 1. Lado Aire (Entrada)
-    const { tWb: tWbCalc, Pv_actual } = calculateWetBulb(
-      inputs.tdb, 
-      inputs.patm, 
-      inputs.psychroMode === 'A' ? inputs.relHumidity : inputs.dewPoint,
-      inputs.psychroMode
-    );
-
-    const W_in = getHumidityRatio(Pv_actual, inputs.patm);
-    const h_air_in = getAirEnthalpy(inputs.tdb, W_in);
-
-    // 2. Lado Agua (Potencia Térmica)
-    const range = inputs.tIn - inputs.tOut;
-    const approach = inputs.tOut - tWbCalc;
-    const efficiency = (range / (range + approach)) * 100;
-    const calculatedCp = getWaterCp((inputs.tIn + inputs.tOut) / 2);
+    <!-- 2. Cargar Iconos Lucide -->
+    <script src="https://unpkg.com/lucide@latest"></script>
     
-    // Potencia Q = m * Cp * dT
-    const capacityKW = inputs.flowRate * calculatedCp * range;
-    const capacityTR = capacityKW / 3.517;
+    <!-- 3. Fuentes Google -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=Merriweather:wght@300;400;700&display=swap" rel="stylesheet">
 
-    // 3. Lado Aire (Flujo Másico Requerido)
-    // Asumimos salida saturada a tAirOutEst
-    const Psat_out = getSatVapPressure(inputs.tAirOutEst);
-    const W_out = getHumidityRatio(Psat_out, inputs.patm);
-    const h_air_out = getAirEnthalpy(inputs.tAirOutEst, W_out);
-
-    const delta_h = h_air_out - h_air_in;
-    // Balance energía aire: Q = m_air * (h_out - h_in)
-    const airMassFlow = delta_h > 0 ? capacityKW / delta_h : 0;
-
-    // 4. Balance de Masa Agua
-    const coc = inputs.tdsMakeup > 0 ? inputs.tdsTower / inputs.tdsMakeup : 0;
-    const evapLoss = capacityKW / LATENT_HEAT; 
-    
-    let makeupWater = 0;
-    let blowdownTotal = 0;
-
-    if (coc > 1) {
-      makeupWater = evapLoss * (coc / (coc - 1));
-      blowdownTotal = makeupWater - evapLoss;
-    }
-
-    // Diagnóstico
-    const newAnalysis = [];
-    if (approach < 0) {
-      newAnalysis.push({ type: 'error', msg: 'Física Imposible: La temperatura de salida es menor al bulbo húmedo.' });
-    }
-    if (delta_h <= 0) {
-      newAnalysis.push({ type: 'error', msg: 'Error Térmico Aire: La entalpía de salida estimada es menor que la de entrada. Aumente la temperatura de salida del aire.' });
-    }
-
-    if (efficiency < 40) newAnalysis.push({ type: 'warning', msg: 'Baja Efectividad (<40%): La torre está subutilizada o tiene problemas severos de distribución.' });
-    else if (efficiency > 85) newAnalysis.push({ type: 'success', msg: 'Alta Efectividad: La torre opera con un rendimiento térmico excelente.' });
-
-    if (approach > 5) newAnalysis.push({ type: 'warning', msg: `Aproximación Alta (${approach.toFixed(1)}°C): Dificultad para transferir calor. Revise relleno y flujo de aire.` });
-    else if (approach < 3 && approach > 0) newAnalysis.push({ type: 'success', msg: 'Aproximación Ideal: Enfriamiento cercano al límite termodinámico.' });
-
-    if (range < 3) newAnalysis.push({ type: 'info', msg: 'Rango Bajo (<3°C): Poca carga térmica. Considere reducir flujo de agua o ventiladores.' });
-
-    if (coc < 2) newAnalysis.push({ type: 'warning', msg: 'COC Bajos (<2): Excesivo desperdicio de agua. Ajuste la purga.' });
-    else if (coc > 7) newAnalysis.push({ type: 'alert', msg: 'COC Altos (>7): Riesgo inminente de incrustación. Verifique LSI y tratamiento químico.' });
-    else newAnalysis.push({ type: 'success', msg: 'COC Balanceado: Operación eficiente en consumo de agua.' });
-
-    setResults({
-      tWb: tWbCalc,
-      range,
-      approach,
-      efficiency,
-      capacityKW,
-      capacityTR,
-      airMassFlow,
-      h_in: h_air_in,
-      h_out: h_air_out,
-      coc,
-      evapLoss,
-      makeupWater,
-      blowdownTotal,
-      usedCp: calculatedCp
-    });
-    setAnalysis(newAnalysis);
-  };
-
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setInputs(prev => ({
-      ...prev,
-      [name]: parseFloat(value) || 0
-    }));
-  };
-
-  // --- VISTA DE PORTADA ---
-  if (showCover) {
-    return (
-      <div className="relative min-h-screen w-full flex items-center justify-center bg-slate-900 overflow-hidden font-sans">
-        {/* IMAGEN DE FONDO */}
-        <div 
-          className="absolute inset-0 z-0 bg-cover bg-center bg-no-repeat"
-          style={{ 
-            backgroundImage: `url('https://github.com/Juansanher25/Coolingtowers/blob/main/Didcot_power_station_cooling_tower_zootalures.jpg?raw=true')`,
-            filter: 'brightness(0.45)'
-          }}
-        ></div>
-
-        {/* CONTENIDO DE PORTADA */}
-        <div className="relative z-10 max-w-4xl mx-auto px-6 text-center text-white space-y-8 animate-in fade-in zoom-in duration-700">
-          
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-500/20 border border-blue-400/30 text-blue-200 text-sm font-medium backdrop-blur-sm">
-              <Activity size={16} />
-              Módulo de Ingeniería Asistido por IA
-            </div>
-            <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-100 via-white to-blue-200 drop-shadow-sm">
-              Torres de Enfriamiento
-            </h1>
-            <h2 className="text-2xl md:text-3xl font-light text-slate-300">
-              Simulación, Cálculo y Diagnóstico
-            </h2>
-          </div>
-
-          <div className="flex flex-col md:flex-row justify-center items-center gap-6 md:gap-12 py-8 text-slate-200">
-            <div className="flex items-center gap-3">
-              <User className="text-blue-400" size={24} />
-              <div className="text-left">
-                <p className="text-xs text-blue-400 uppercase font-bold tracking-wider">Autor</p>
-                <p className="font-medium text-lg">Ph.D. (c) Juan Andrés Sandoval Herrera</p>
-              </div>
-            </div>
-            
-            <div className="hidden md:block w-px h-12 bg-slate-600"></div>
-
-            <div className="flex items-center gap-3">
-              <BookOpen className="text-emerald-400" size={24} />
-              <div className="text-left">
-                <p className="text-xs text-emerald-400 uppercase font-bold tracking-wider">Curso</p>
-                <p className="font-medium text-lg">Otros Equipos de Transferencia de Calor</p>
-              </div>
-            </div>
-
-            <div className="hidden md:block w-px h-12 bg-slate-600"></div>
-
-            <div className="flex items-center gap-3">
-              <Calendar className="text-amber-400" size={24} />
-              <div className="text-left">
-                <p className="text-xs text-amber-400 uppercase font-bold tracking-wider">Año</p>
-                <p className="font-medium text-lg">2025</p>
-              </div>
-            </div>
-          </div>
-
-          <button 
-            onClick={() => setShowCover(false)}
-            className="group relative inline-flex items-center gap-3 px-8 py-4 bg-blue-600 hover:bg-blue-500 text-white text-lg font-bold rounded-full transition-all duration-300 shadow-[0_0_20px_rgba(37,99,235,0.5)] hover:shadow-[0_0_30px_rgba(37,99,235,0.8)] transform hover:-translate-y-1"
-          >
-            Iniciar Módulo
-            <ArrowRight className="group-hover:translate-x-1 transition-transform" />
-          </button>
-        </div>
-
-        {/* FOOTER */}
-        <div className="absolute bottom-6 w-full text-center text-slate-400 text-xs">
-          Powered by React & Tailwind CSS System Logic
-        </div>
-      </div>
-    );
-  }
-
-  // --- VISTA DE APLICACIÓN ---
-  return (
-    <div className="bg-slate-50 min-h-screen p-4 md:p-8 font-sans text-slate-800 animate-in fade-in duration-500">
-      <div className="max-w-6xl mx-auto space-y-6">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        h1, h2, h3 { font-family: 'Merriweather', serif; }
         
-        {/* HEADER APP */}
-        <header className="bg-white p-6 rounded-xl shadow-sm border-l-4 border-blue-600 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-              <Activity className="text-blue-600" />
-              Módulo de Ingeniería: Torres de Enfriamiento
-            </h1>
-            <p className="text-slate-500 text-sm mt-1">
-              Ph.D. (c) Juan Andrés Sandoval Herrera | Transferencia de Calor
-            </p>
-          </div>
-          <button 
-            onClick={() => setShowCover(true)}
-            className="text-sm text-blue-600 hover:text-blue-800 font-medium underline"
-          >
-            Volver a Portada
-          </button>
-        </header>
+        /* Animaciones suaves */
+        .fade-in { animation: fadeIn 0.5s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        
+        /* Utilidades */
+        .hidden { display: none !important; }
+        
+        /* Estilos específicos para inputs numéricos */
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* INPUT SECTION */}
-          <div className="lg:col-span-1 space-y-6">
-            <section className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-              <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
-                <Settings size={18} /> Parámetros de Operación
-              </h3>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Presión Atmosférica (kPa)</label>
-                  <input 
-                    type="number" name="patm" value={inputs.patm} onChange={handleInputChange}
-                    className="w-full p-2 border rounded bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none"
-                  />
-                  <span className="text-xs text-slate-400">1 atm ≈ 101.3 kPa | Bogotá ≈ 74 kPa</span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Flujo Agua (kg/s)</label>
-                    <input type="number" name="flowRate" value={inputs.flowRate} onChange={handleInputChange} className="w-full p-2 border rounded bg-slate-50" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Cp Agua (kJ/kg°C)</label>
-                    <div className="relative">
-                      <input 
-                        disabled 
-                        value={currentCp.toFixed(3)} 
-                        className="w-full p-2 border rounded bg-slate-100 text-slate-600 font-mono text-sm" 
-                      />
-                      <span className="absolute right-2 top-2 text-[10px] text-slate-400">@ {tAvg.toFixed(1)}°C</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">T. Entrada (°C)</label>
-                    <input type="number" name="tIn" value={inputs.tIn} onChange={handleInputChange} className="w-full p-2 border rounded bg-slate-50 text-red-600 font-medium" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">T. Salida (°C)</label>
-                    <input type="number" name="tOut" value={inputs.tOut} onChange={handleInputChange} className="w-full p-2 border rounded bg-slate-50 text-blue-600 font-medium" />
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <section className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-              <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
-                <Wind size={18} /> Psicrometría (Aire)
-              </h3>
-              
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-2">
-                    <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Temp. Bulbo Seco (°C)</label>
-                        <input type="number" name="tdb" value={inputs.tdb} onChange={handleInputChange} className="w-full p-2 border rounded bg-slate-50" />
-                    </div>
-                    <div>
-                         {/* Selector simple para el ejemplo */}
-                         <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Humedad Relativa (%)</label>
-                         <input type="number" name="relHumidity" value={inputs.relHumidity} onChange={handleInputChange} className="w-full p-2 border rounded bg-slate-50" />
-                    </div>
-                </div>
-                
-                {/* Nuevo Input: Estimación Salida Aire */}
-                <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-lg">
-                  <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">Estimación T. Salida Aire (°C)</label>
-                  <input type="number" name="tAirOutEst" value={inputs.tAirOutEst} onChange={handleInputChange} className="w-full p-2 border border-indigo-200 rounded bg-white font-bold text-indigo-600" />
-                  <p className="text-[10px] text-indigo-400 mt-1 leading-tight">Requerido para calcular el flujo másico de aire.</p>
-                </div>
-              </div>
-            </section>
-
-            <section className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-              <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
-                <Droplets size={18} /> Química del Agua
-              </h3>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">SDT Torre (ppm)</label>
-                  <input type="number" name="tdsTower" value={inputs.tdsTower} onChange={handleInputChange} className="w-full p-2 border rounded bg-slate-50" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">SDT Reposición (ppm)</label>
-                  <input type="number" name="tdsMakeup" value={inputs.tdsMakeup} onChange={handleInputChange} className="w-full p-2 border rounded bg-slate-50" />
-                </div>
-              </div>
-            </section>
-
-            <button 
-              onClick={handleCalculate}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-lg transition-all flex items-center justify-center gap-2"
-            >
-              <Calculator size={20} /> Calcular y Diagnosticar
-            </button>
-          </div>
-
-          {/* RESULTS SECTION */}
-          <div className="lg:col-span-2 space-y-6">
-            
-            {!results ? (
-              <div className="h-full flex flex-col items-center justify-center text-slate-400 bg-white rounded-xl border border-dashed border-slate-300 min-h-[400px]">
-                <Activity size={48} className="mb-4 opacity-50 text-blue-400" />
-                <p className="text-lg font-medium">Esperando datos...</p>
-                <p className="text-sm">Ingrese los parámetros a la izquierda y presione Calcular.</p>
-              </div>
-            ) : (
-              <>
-                {/* NUEVO: Tarjetas de Resultados de Diseño Destacadas */}
-                <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-200 mb-2">
-                    <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2 border-b pb-2">
-                        <Activity size={20} className="text-blue-600"/> Resultados de Diseño
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        {/* Potencia Térmica */}
-                        <div className="bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl p-5 text-white shadow-lg relative overflow-hidden">
-                            <div className="relative z-10">
-                                <p className="text-blue-100 text-xs font-bold uppercase tracking-wider mb-1">Potencia Térmica (Q)</p>
-                                <div className="flex items-baseline gap-2">
-                                    <p className="text-3xl font-bold">{results.capacityKW.toFixed(1)}</p>
-                                    <span className="text-sm opacity-80">kW</span>
-                                </div>
-                                <div className="mt-2 bg-white/20 inline-block px-3 py-1 rounded text-sm font-semibold">
-                                    {results.capacityTR.toFixed(1)} TR
-                                </div>
-                            </div>
-                            <Zap className="absolute -bottom-4 -right-4 w-24 h-24 text-white opacity-20" />
-                        </div>
-
-                        {/* Flujo Aire */}
-                        <div className="bg-gradient-to-br from-cyan-500 to-blue-500 rounded-xl p-5 text-white shadow-lg relative overflow-hidden">
-                            <div className="relative z-10">
-                                <p className="text-cyan-100 text-xs font-bold uppercase tracking-wider mb-1">Flujo Másico Aire Requerido</p>
-                                <div className="flex items-baseline gap-2">
-                                    <p className="text-3xl font-bold">{results.airMassFlow.toFixed(2)}</p>
-                                    <span className="text-sm opacity-80">kg/s</span>
-                                </div>
-                                <div className="mt-2 flex gap-2 text-xs opacity-90">
-                                    <span className="bg-black/20 px-2 py-1 rounded">Δh Aire: {(results.h_out - results.h_in).toFixed(1)} kJ/kg</span>
-                                </div>
-                            </div>
-                            <Fan className="absolute -bottom-4 -right-4 w-24 h-24 text-white opacity-20" />
-                        </div>
-                    </div>
-                </div>
-
-                {/* INDICADORES DE DESEMPEÑO */}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <ResultCard 
-                    title="Bulbo Húmedo" 
-                    value={`${results.tWb.toFixed(1)} °C`} 
-                    sub="Calculado"
-                    icon={<Thermometer className="text-white" size={20} />}
-                    color="bg-slate-500"
-                  />
-                  <ResultCard 
-                    title="Aproximación" 
-                    value={`${results.approach.toFixed(1)} °C`} 
-                    sub="T_out - T_wb"
-                    icon={<Activity className="text-white" size={20} />}
-                    color="bg-slate-600"
-                  />
-                  <ResultCard 
-                    title="Efectividad" 
-                    value={`${results.efficiency.toFixed(1)} %`} 
-                    sub={`Rango: ${results.range.toFixed(1)} °C`}
-                    icon={<CheckCircle className="text-white" size={20} />}
-                    color="bg-emerald-600"
-                  />
-                  <ResultCard 
-                    title="Ciclos (COC)" 
-                    value={results.coc.toFixed(1)} 
-                    sub="Concentración"
-                    icon={<Droplets className="text-white" size={20} />}
-                    color="bg-amber-500"
-                  />
-                </div>
-
-                {/* MASS BALANCE */}
-                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                  <div className="bg-slate-50 px-6 py-3 border-b border-slate-200">
-                    <h3 className="font-bold text-slate-700">Balance de Masa (Agua)</h3>
-                  </div>
-                  <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-8 text-center relative">
-                    <div className="absolute top-1/2 left-0 w-full h-1 bg-slate-100 -z-0 hidden md:block"></div>
-
-                    <div className="z-10 bg-white p-4 rounded-lg border border-slate-100 shadow-sm">
-                      <p className="text-xs text-slate-400 uppercase font-bold">Agua Reposición</p>
-                      <p className="text-2xl font-bold text-blue-600 mt-1">{results.makeupWater.toFixed(3)}</p>
-                      <p className="text-xs text-slate-500">kg/s</p>
-                    </div>
-
-                    <div className="z-10 bg-white p-4 rounded-lg border border-slate-100 shadow-sm">
-                      <p className="text-xs text-slate-400 uppercase font-bold">Pérdida Evaporación</p>
-                      <p className="text-2xl font-bold text-sky-500 mt-1">{results.evapLoss.toFixed(3)}</p>
-                      <p className="text-xs text-slate-500">kg/s</p>
-                    </div>
-
-                    <div className="z-10 bg-white p-4 rounded-lg border border-slate-100 shadow-sm">
-                      <p className="text-xs text-slate-400 uppercase font-bold">Purga Total</p>
-                      <p className="text-2xl font-bold text-amber-500 mt-1">{results.blowdownTotal.toFixed(3)}</p>
-                      <p className="text-xs text-slate-500">kg/s</p>
-                    </div>
-                  </div>
-                  <div className="px-6 pb-4 text-xs text-slate-400 text-center">
-                    * Cp utilizado: {results.usedCp.toFixed(4)} kJ/kg°C
-                  </div>
-                </div>
-
-                {/* ENGINEERING ANALYSIS */}
-                <div className="bg-white rounded-xl shadow-sm border border-slate-200">
-                  <div className="bg-slate-800 px-6 py-4 rounded-t-xl flex justify-between items-center">
-                    <h3 className="font-bold text-white flex items-center gap-2">
-                      <Info size={20} className="text-blue-300"/> Diagnóstico
-                    </h3>
-                  </div>
-                  <div className="p-6 space-y-3">
-                    {analysis.map((item, idx) => (
-                      <div 
-                        key={idx} 
-                        className={`p-4 rounded-lg border-l-4 flex gap-3 ${
-                          item.type === 'error' ? 'bg-red-50 border-red-500 text-red-800' :
-                          item.type === 'warning' ? 'bg-amber-50 border-amber-500 text-amber-800' :
-                          item.type === 'alert' ? 'bg-orange-50 border-orange-500 text-orange-800' :
-                          item.type === 'info' ? 'bg-blue-50 border-blue-500 text-blue-800' :
-                          'bg-emerald-50 border-emerald-500 text-emerald-800'
-                        }`}
-                      >
-                        <div className="mt-1">
-                          {item.type === 'success' ? <CheckCircle size={18} /> : <AlertTriangle size={18} />}
-                        </div>
-                        <p className="text-sm font-medium leading-relaxed">{item.msg}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
+    <!-- ================= PANTALLA DE PORTADA ================= -->
+    <div id="cover-screen" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900 text-white">
+        <!-- Imagen de Fondo -->
+        <div class="absolute inset-0 z-0 bg-cover bg-center opacity-40"
+             style="background-image: url('https://raw.githubusercontent.com/Juansanher25/Coolingtowers/main/Didcot_power_station_cooling_tower_zootalures.jpg');">
         </div>
-      </div>
-    </div>
-  );
-};
 
-// Helper Component for Cards
-const ResultCard = ({ title, value, sub, icon, color }) => (
-  <div className={`${color} rounded-xl p-4 text-white shadow-lg relative overflow-hidden`}>
-    <div className="flex justify-between items-start z-10 relative">
-      <div>
-        <p className="text-blue-100 text-xs font-bold uppercase tracking-wider mb-1">{title}</p>
-        <p className="text-2xl font-bold">{value}</p>
-        <p className="text-blue-100 text-xs mt-1 bg-white/20 inline-block px-2 py-0.5 rounded">{sub}</p>
-      </div>
-      <div className="bg-white/20 p-2 rounded-lg">
-        {icon}
-      </div>
-    </div>
-    <div className="absolute -bottom-4 -right-4 w-20 h-20 bg-white/10 rounded-full"></div>
-  </div>
-);
+        <div class="relative z-10 max-w-5xl mx-auto px-6 text-center space-y-8 fade-in">
+            <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-500/20 border border-blue-400/30 text-blue-200 text-sm font-medium backdrop-blur-sm">
+                <i data-lucide="activity" class="w-4 h-4"></i> Módulo de Ingeniería Asistido por IA
+            </div>
+            
+            <h1 class="text-5xl md:text-7xl font-extrabold tracking-tight text-white drop-shadow-lg">
+                Torres de Enfriamiento
+            </h1>
+            <h2 class="text-2xl md:text-3xl font-light text-slate-300">
+                Simulación, Cálculo y Diagnóstico
+            </h2>
 
-export default CoolingTowerApp;
+            <div class="flex flex-col md:flex-row justify-center items-center gap-8 py-8 border-t border-b border-white/10 mt-8">
+                <div class="flex items-center gap-3">
+                    <i data-lucide="user" class="w-6 h-6 text-blue-400"></i>
+                    <div class="text-left">
+                        <p class="text-xs text-blue-400 uppercase font-bold">Autor</p>
+                        <p class="font-medium">Ph.D. (c) Juan Andrés Sandoval</p>
+                    </div>
+                </div>
+                <div class="hidden md:block w-px h-12 bg-slate-600"></div>
+                <div class="flex items-center gap-3">
+                    <i data-lucide="book-open" class="w-6 h-6 text-emerald-400"></i>
+                    <div class="text-left">
+                        <p class="text-xs text-emerald-400 uppercase font-bold">Curso</p>
+                        <p class="font-medium">Transferencia de Calor II</p>
+                    </div>
+                </div>
+                <div class="hidden md:block w-px h-12 bg-slate-600"></div>
+                <div class="flex items-center gap-3">
+                    <i data-lucide="calendar" class="w-6 h-6 text-amber-400"></i>
+                    <div class="text-left">
+                        <p class="text-xs text-amber-400 uppercase font-bold">Año</p>
+                        <p class="font-medium">2025</p>
+                    </div>
+                </div>
+            </div>
+
+            <button onclick="startApp()" class="group relative inline-flex items-center gap-3 px-8 py-4 bg-blue-600 hover:bg-blue-500 text-white text-lg font-bold rounded-full transition-all shadow-[0_0_20px_rgba(37,99,235,0.5)] hover:-translate-y-1">
+                Iniciar Módulo <i data-lucide="arrow-right" class="w-5 h-5 group-hover:translate-x-1 transition-transform"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- ================= PANTALLA DE APLICACIÓN ================= -->
+    <div id="app-screen" class="hidden min-h-screen p-4 md:p-8 fade-in">
+        <div class="max-w-6xl mx-auto space-y-6">
+            
+            <!-- Header -->
+            <header class="bg-white p-6 rounded-xl shadow-sm border-l-4 border-blue-600 flex flex-col md:flex-row justify-between items-center gap-4">
+                <div>
+                    <h1 class="text-2xl font-bold text-slate-900 flex items-center gap-2">
+                        <i data-lucide="activity" class="text-blue-600"></i>
+                        Módulo de Ingeniería: Torres de Enfriamiento
+                    </h1>
+                    <p class="text-slate-500 text-sm mt-1">Ph.D. (c) Juan Andrés Sandoval Herrera | Transferencia de Calor</p>
+                </div>
+                <button onclick="showCover()" class="text-sm text-blue-600 hover:text-blue-800 font-medium underline">
+                    Volver a Portada
+                </button>
+            </header>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                
+                <!-- COLUMNA IZQUIERDA: INPUTS -->
+                <div class="lg:col-span-1 space-y-6">
+                    
+                    <!-- Panel Agua -->
+                    <section class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h3 class="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                            <i data-lucide="settings" class="w-4 h-4 text-slate-500"></i> Parámetros de Operación
+                        </h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Presión Atmosférica (kPa)</label>
+                                <input type="number" id="patm" value="101.325" class="w-full p-2 border rounded bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none transition-all">
+                                <span class="text-[10px] text-slate-400">1 atm ≈ 101.3 kPa | Bogotá ≈ 74 kPa</span>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Flujo Agua (kg/s)</label>
+                                    <input type="number" id="flowRate" value="15" class="w-full p-2 border rounded bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Cp Agua</label>
+                                    <input type="text" id="cpDisplay" disabled value="-" class="w-full p-2 border rounded bg-slate-100 text-slate-500 text-xs font-mono">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">T. Entrada (°C)</label>
+                                    <input type="number" id="tIn" value="45" class="w-full p-2 border border-red-200 bg-red-50 text-red-700 font-bold rounded focus:ring-2 focus:ring-red-500 outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">T. Salida (°C)</label>
+                                    <input type="number" id="tOut" value="30" class="w-full p-2 border border-blue-200 bg-blue-50 text-blue-700 font-bold rounded focus:ring-2 focus:ring-blue-500 outline-none">
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Panel Aire -->
+                    <section class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h3 class="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                            <i data-lucide="wind" class="w-4 h-4 text-slate-500"></i> Aire y Psicrometría
+                        </h3>
+                        <div class="space-y-4">
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">T. Bulbo Seco (°C)</label>
+                                    <input type="number" id="tdb" value="30" class="w-full p-2 border rounded bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">% Humedad Rel.</label>
+                                    <input type="number" id="rh" value="60" class="w-full p-2 border rounded bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none">
+                                </div>
+                            </div>
+                            <div class="p-3 bg-indigo-50 border border-indigo-100 rounded-lg">
+                                <label class="block text-xs font-bold text-indigo-800 uppercase mb-1">Estimación T. Salida Aire (°C)</label>
+                                <input type="number" id="tAirOutEst" value="38" class="w-full p-2 border border-indigo-200 rounded bg-white font-bold text-indigo-600 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <p class="text-[10px] text-indigo-400 mt-1">Requerido para cálculo de flujo de aire.</p>
+                            </div>
+                        </div>
+                    </section>
+                    
+                    <!-- Panel Química -->
+                    <section class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h3 class="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                            <i data-lucide="droplets" class="w-4 h-4 text-slate-500"></i> Química del Agua
+                        </h3>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 uppercase mb-1">SDT Torre</label>
+                                <input type="number" id="tdsTower" value="1200" class="w-full p-2 border rounded bg-slate-50">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 uppercase mb-1">SDT Reposición</label>
+                                <input type="number" id="tdsMakeup" value="300" class="w-full p-2 border rounded bg-slate-50">
+                            </div>
+                        </div>
+                    </section>
+
+                    <button onclick="calculate()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 transform active:scale-95">
+                        <i data-lucide="calculator" class="w-5 h-5"></i> Calcular y Diagnosticar
+                    </button>
+                </div>
+
+                <!-- COLUMNA DERECHA: RESULTADOS -->
+                <div class="lg:col-span-2 space-y-6">
+                    
+                    <!-- Estado Inicial -->
+                    <div id="empty-state" class="h-full flex flex-col items-center justify-center text-slate-400 bg-white rounded-xl border-2 border-dashed border-slate-300 min-h-[400px]">
+                        <i data-lucide="activity" class="w-12 h-12 mb-4 opacity-50 text-blue-300"></i>
+                        <p class="text-lg font-medium">Sistema Listo</p>
+                        <p class="text-sm">Ingrese parámetros y presione Calcular.</p>
+                    </div>
+
+                    <!-- Contenedor Resultados -->
+                    <div id="results-container" class="hidden space-y-6">
+                        
+                        <!-- TARJETAS DESTACADAS (Potencia y Aire) -->
+                        <div class="bg-white rounded-xl p-6 shadow-sm border border-slate-200">
+                            <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2 border-b pb-2">
+                                <i data-lucide="zap" class="w-5 h-5 text-blue-600"></i> Resultados de Diseño
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+                                <!-- Potencia -->
+                                <div class="bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl p-5 text-white shadow-lg relative overflow-hidden group">
+                                    <div class="relative z-10">
+                                        <p class="text-blue-100 text-xs font-bold uppercase tracking-wider mb-1">Potencia Térmica (Q)</p>
+                                        <div class="flex items-baseline gap-2">
+                                            <span id="res-kw" class="text-3xl font-bold">0.0</span>
+                                            <span class="text-sm opacity-80">kW</span>
+                                        </div>
+                                        <div class="mt-2 bg-white/20 inline-block px-3 py-1 rounded text-sm font-semibold backdrop-blur-sm">
+                                            <span id="res-tr">0.0</span> TR
+                                        </div>
+                                    </div>
+                                    <i data-lucide="zap" class="absolute -bottom-4 -right-4 w-24 h-24 text-white opacity-10 group-hover:opacity-20 transition-opacity"></i>
+                                </div>
+
+                                <!-- Aire -->
+                                <div class="bg-gradient-to-br from-cyan-500 to-blue-500 rounded-xl p-5 text-white shadow-lg relative overflow-hidden group">
+                                    <div class="relative z-10">
+                                        <p class="text-cyan-100 text-xs font-bold uppercase tracking-wider mb-1">Flujo Másico Aire Requerido</p>
+                                        <div class="flex items-baseline gap-2">
+                                            <span id="res-air" class="text-3xl font-bold">0.00</span>
+                                            <span class="text-sm opacity-80">kg/s</span>
+                                        </div>
+                                        <div class="mt-2 text-xs opacity-90">
+                                            Δh Aire: <span id="res-delta-h">0.0</span> kJ/kg
+                                        </div>
+                                    </div>
+                                    <i data-lucide="fan" class="absolute -bottom-4 -right-4 w-24 h-24 text-white opacity-10 group-hover:opacity-20 transition-opacity"></i>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- INDICADORES -->
+                        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                                <p class="text-xs text-slate-400 font-bold uppercase">Bulbo Húmedo</p>
+                                <p class="text-xl font-bold text-slate-700"><span id="res-twb">0.0</span> °C</p>
+                            </div>
+                            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                                <p class="text-xs text-slate-400 font-bold uppercase">Aproximación</p>
+                                <p class="text-xl font-bold text-slate-700"><span id="res-appr">0.0</span> °C</p>
+                            </div>
+                            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                                <p class="text-xs text-slate-400 font-bold uppercase">Rango</p>
+                                <p class="text-xl font-bold text-slate-700"><span id="res-range">0.0</span> °C</p>
+                            </div>
+                            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                                <p class="text-xs text-slate-400 font-bold uppercase">Efectividad</p>
+                                <p class="text-xl font-bold text-emerald-600"><span id="res-eff">0.0</span> %</p>
+                            </div>
+                        </div>
+
+                        <!-- BALANCE AGUA -->
+                        <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                            <div class="bg-slate-50 px-6 py-3 border-b border-slate-200">
+                                <h3 class="font-bold text-slate-700 text-sm">Balance de Masa (Agua)</h3>
+                            </div>
+                            <div class="p-6 grid grid-cols-1 md:grid-cols-3 gap-6 text-center">
+                                <div class="bg-white p-3 rounded border border-slate-100 shadow-sm">
+                                    <p class="text-xs text-slate-400 font-bold uppercase">Reposición</p>
+                                    <p class="text-2xl font-bold text-blue-600"><span id="res-makeup">0.00</span> <span class="text-xs font-normal text-slate-500">kg/s</span></p>
+                                </div>
+                                <div class="bg-white p-3 rounded border border-slate-100 shadow-sm">
+                                    <p class="text-xs text-slate-400 font-bold uppercase">Evaporación</p>
+                                    <p class="text-2xl font-bold text-sky-500"><span id="res-evap">0.00</span> <span class="text-xs font-normal text-slate-500">kg/s</span></p>
+                                </div>
+                                <div class="bg-white p-3 rounded border border-slate-100 shadow-sm">
+                                    <p class="text-xs text-slate-400 font-bold uppercase">Purga</p>
+                                    <p class="text-2xl font-bold text-amber-500"><span id="res-blow">0.00</span> <span class="text-xs font-normal text-slate-500">kg/s</span></p>
+                                </div>
+                            </div>
+                            <div class="px-6 pb-4 text-center text-xs text-slate-400">
+                                COC Calculado: <span id="res-coc" class="font-bold">0.0</span>
+                            </div>
+                        </div>
+
+                        <!-- DIAGNOSTICO -->
+                        <div class="bg-white rounded-xl shadow-sm border border-slate-200">
+                            <div class="bg-slate-800 px-6 py-4 rounded-t-xl">
+                                <h3 class="font-bold text-white flex items-center gap-2">
+                                    <i data-lucide="info" class="text-blue-300 w-5 h-5"></i> Diagnóstico
+                                </h3>
+                            </div>
+                            <div id="diagnostics-list" class="p-6 space-y-3">
+                                <!-- JS inyectará aquí -->
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= LOGICA JAVASCRIPT ================= -->
+    <script>
+        // Inicializar Iconos al cargar
+        lucide.createIcons();
+
+        // NAVEGACION
+        function startApp() {
+            document.getElementById('cover-screen').classList.add('hidden');
+            document.getElementById('app-screen').classList.remove('hidden');
+        }
+
+        function showCover() {
+            document.getElementById('cover-screen').classList.remove('hidden');
+            document.getElementById('app-screen').classList.add('hidden');
+        }
+
+        // CONSTANTES Y FORMULAS
+        const LATENT_HEAT = 2430; 
+
+        function getWaterCp(t) {
+            const A = 4.2174, B = -0.005618, C = 0.0001299, D = -0.000001152;
+            return A + (B * t) + (C * t * t) + (D * t * t * t);
+        }
+
+        function getSatVapPressure(T) {
+            return 0.61078 * Math.exp((17.27 * T) / (T + 237.3));
+        }
+
+        function getHumidityRatio(Pv, P_kPa) {
+            return 0.622 * Pv / (P_kPa - Pv);
+        }
+
+        function getAirEnthalpy(T, W) {
+            return 1.006 * T + W * (2501 + 1.86 * T);
+        }
+
+        function calculateWetBulb(Tdb, P_kPa, humidityInput) {
+            const Psat = getSatVapPressure(Tdb);
+            const Pv = Psat * (humidityInput / 100);
+            
+            let low = -20, high = Tdb, Twb_guess = Tdb;
+            for (let i = 0; i < 50; i++) {
+                Twb_guess = (low + high) / 2;
+                const Psat_wb = getSatVapPressure(Twb_guess);
+                const bracketTerm = 0.00066 * (1 + 0.00115 * Twb_guess) * P_kPa * (Tdb - Twb_guess);
+                const Pv_iter = Psat_wb - bracketTerm;
+                if (Pv_iter > Pv) high = Twb_guess; else low = Twb_guess;
+            }
+            return { tWb: Twb_guess, Pv_actual: Pv };
+        }
+
+        // FUNCION PRINCIPAL DE CALCULO
+        function calculate() {
+            // Leer Inputs
+            const getVal = (id) => parseFloat(document.getElementById(id).value) || 0;
+            
+            const patm = getVal('patm');
+            const flowRate = getVal('flowRate');
+            const tIn = getVal('tIn');
+            const tOut = getVal('tOut');
+            const tdb = getVal('tdb');
+            const rh = getVal('rh');
+            const tAirOutEst = getVal('tAirOutEst');
+            const tdsTower = getVal('tdsTower');
+            const tdsMakeup = getVal('tdsMakeup');
+
+            // 1. Propiedades Agua
+            const tAvg = (tIn + tOut) / 2;
+            const cp = getWaterCp(tAvg);
+            document.getElementById('cpDisplay').value = cp.toFixed(4) + " kJ/kg°C";
+
+            // 2. Psicrometría Entrada
+            const { tWb, Pv_actual } = calculateWetBulb(tdb, patm, rh);
+            const W_in = getHumidityRatio(Pv_actual, patm);
+            const h_air_in = getAirEnthalpy(tdb, W_in);
+
+            // 3. Potencia Térmica
+            const range = tIn - tOut;
+            const approach = tOut - tWb;
+            const efficiency = (range / (range + approach)) * 100;
+            
+            const capacityKW = flowRate * cp * range;
+            const capacityTR = capacityKW / 3.517;
+
+            // 4. Flujo Aire
+            const Psat_out = getSatVapPressure(tAirOutEst);
+            const W_out = getHumidityRatio(Psat_out, patm);
+            const h_air_out = getAirEnthalpy(tAirOutEst, W_out);
+            const delta_h = h_air_out - h_air_in;
+            const airMassFlow = delta_h > 0 ? capacityKW / delta_h : 0;
+
+            // 5. Balance Agua
+            const coc = tdsMakeup > 0 ? tdsTower / tdsMakeup : 0;
+            const evapLoss = capacityKW / LATENT_HEAT;
+            let makeupWater = 0, blowdownTotal = 0;
+            if (coc > 1) {
+                makeupWater = evapLoss * (coc / (coc - 1));
+                blowdownTotal = makeupWater - evapLoss;
+            }
+
+            // --- ACTUALIZAR UI ---
+            document.getElementById('empty-state').classList.add('hidden');
+            document.getElementById('results-container').classList.remove('hidden');
+
+            // Tarjetas Grandes
+            document.getElementById('res-kw').textContent = capacityKW.toFixed(1);
+            document.getElementById('res-tr').textContent = capacityTR.toFixed(1);
+            document.getElementById('res-air').textContent = airMassFlow.toFixed(2);
+            document.getElementById('res-delta-h').textContent = delta_h.toFixed(1);
+
+            // Indicadores
+            document.getElementById('res-twb').textContent = tWb.toFixed(1);
+            document.getElementById('res-appr').textContent = approach.toFixed(1);
+            document.getElementById('res-range').textContent = range.toFixed(1);
+            document.getElementById('res-eff').textContent = efficiency.toFixed(1);
+
+            // Balance
+            document.getElementById('res-makeup').textContent = makeupWater.toFixed(3);
+            document.getElementById('res-evap').textContent = evapLoss.toFixed(3);
+            document.getElementById('res-blow').textContent = blowdownTotal.toFixed(3);
+            document.getElementById('res-coc').textContent = coc.toFixed(1);
+
+            // Diagnósticos
+            const list = document.getElementById('diagnostics-list');
+            list.innerHTML = ''; // Limpiar
+
+            const addDiag = (msg, type) => {
+                const styles = {
+                    error: 'bg-red-50 border-red-500 text-red-800',
+                    warning: 'bg-amber-50 border-amber-500 text-amber-800',
+                    success: 'bg-emerald-50 border-emerald-500 text-emerald-800',
+                    info: 'bg-blue-50 border-blue-500 text-blue-800'
+                };
+                const div = document.createElement('div');
+                div.className = `p-4 rounded-lg border-l-4 flex gap-3 ${styles[type]}`;
+                div.innerHTML = `<div class="mt-1"><i data-lucide="${type === 'success' ? 'check-circle' : 'alert-triangle'}" class="w-5 h-5"></i></div><p class="text-sm font-medium">${msg}</p>`;
+                list.appendChild(div);
+            };
+
+            if (approach < 0) addDiag('Error Físico: T. Salida menor que Bulbo Húmedo.', 'error');
+            if (delta_h <= 0) addDiag('Error Aire: Entalpía Salida < Entrada. Aumente la T. Salida Aire Estimada.', 'error');
+            
+            if (efficiency > 85) addDiag('Alta Efectividad: Operación térmica excelente.', 'success');
+            else if (efficiency < 40) addDiag('Baja Efectividad: Posible mala distribución o subcarga.', 'warning');
+            
+            if (approach <= 3 && approach > 0) addDiag('Aproximación Ideal.', 'success');
+            else if (approach > 5) addDiag('Aproximación Alta: Dificultad para transferir calor.', 'warning');
+
+            if (coc < 2) addDiag('COC Bajo (<2): Desperdicio de agua.', 'warning');
+            else if (coc > 7) addDiag('COC Alto (>7): Riesgo de incrustación.', 'warning');
+            else addDiag('Química Balanceada.', 'success');
+
+            // Refrescar iconos nuevos
+            lucide.createIcons();
+        }
+    </script>
+</body>
+</html>
